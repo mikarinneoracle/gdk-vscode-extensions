@@ -373,6 +373,11 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                     if (deployData.okeCluster) {
                         totalSteps += 8; // OKE setup command spec and artifact, OKE deploy spec and artifact, deploy to OKE pipeline, dev OKE deploy spec and artifact, dev deploy to OKE pipeline
                     }
+                } else if (projectFolder.projectType === 'NodeJS') {
+                    totalSteps += 3; // Docker image build spec and pipeline, container repository
+                    if (deployData.okeCluster) {
+                        totalSteps += 4; // OKE deploy spec and artifact, deploy to OKE pipeline
+                    }
                 } else {
                     const baLocation = await projectUtils.getProjectBuildArtifactLocation(projectFolder);
                     let buildCommand;
@@ -954,7 +959,7 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                 if (!project_devbuild_command && folder.projectType !== 'Unknown') {
                     dialogs.showErrorMessage(`Failed to resolve ${FAT_JAR_NAME_LC} build command for folder ${folder.uri.fsPath}`);
                 }
-                if (project_devbuild_artifact_location && project_devbuild_command) {
+                if (project_devbuild_artifact_location && project_devbuild_command && folder.projectType !== 'NodeJS') {
                     // --- Generate fat JAR build spec
                     progress.report({
                         increment,
@@ -1070,10 +1075,11 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             logUtils.logInfo(`[deploy] Creating build pipeline for ${FAT_JAR_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             const pipelineName = `${repositoryNamePrefix}${devbuildPipelineName}`;
                             folderData.devbuildPipeline = false;
-                            folderData.devbuildPipeline = (await ociUtils.createBuildPipeline(provider, projectOCID, pipelineName, devbuildPipelineDescription, [
+                            const pipelineParameters = [
                                 { name: 'GRAALVM_VERSION', defaultValue: DEFAULT_GRAALVM_VERSION, description: 'Major GraalVM version number, e.g. 22 for 22.2.0 release'},
                                 { name: 'JAVA_VERSION', defaultValue: DEFAULT_JAVA_VERSION, description: 'Java version of given GraalVM version e.g. 11 for GraalVM 22.2.0 JDK 11'}
-                            ], {
+                            ];
+                            folderData.devbuildPipeline = (await ociUtils.createBuildPipeline(provider, projectOCID, pipelineName, devbuildPipelineDescription, pipelineParameters, {
                                 'devops_tooling_deployID': deployData.tag,
                                 'devops_tooling_codeRepoID': codeRepository.id,
                                 'devops_tooling_codeRepoPrefix': repositoryNamePrefix
@@ -1151,16 +1157,20 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                     }
                 }
 
-                const project_native_executable_artifact_location = pathForTargetPlatform(await projectUtils.getProjectNativeExecutableArtifactLocation(folder));
-                if (!project_native_executable_artifact_location && folder.projectType !== 'Unknown') {
-                    dialogs.showErrorMessage(`Failed to resolve ${NI_NAME_LC} artifact for folder ${folder.uri.fsPath}`);
+                let project_native_executable_artifact_location: string | undefined;
+                let project_build_native_executable_command: string | undefined;
+                if (folder.projectType !== 'NodeJS') {
+                    project_native_executable_artifact_location = pathForTargetPlatform(await projectUtils.getProjectNativeExecutableArtifactLocation(folder));
+                    if (!project_native_executable_artifact_location && folder.projectType !== 'Unknown') {
+                        dialogs.showErrorMessage(`Failed to resolve ${NI_NAME_LC} artifact for folder ${folder.uri.fsPath}`);
+                    }
+                    project_build_native_executable_command = folder.projectType === 'Unknown' ? niBuildCommands.get(folder) : 
+                        await projectUtils.getProjectBuildNativeExecutableCommand(folder, undefined, includeTests);
+                    if (!project_build_native_executable_command && folder.projectType !== 'Unknown') {
+                        dialogs.showErrorMessage(`Failed to resolve ${NI_NAME_LC} build command for folder ${folder.uri.fsPath}`);
+                    }
                 }
-                const project_build_native_executable_command = folder.projectType === 'Unknown' ? niBuildCommands.get(folder) : 
-                    await projectUtils.getProjectBuildNativeExecutableCommand(folder, undefined, includeTests);
-                if (!project_build_native_executable_command && folder.projectType !== 'Unknown') {
-                    dialogs.showErrorMessage(`Failed to resolve ${NI_NAME_LC} build command for folder ${folder.uri.fsPath}`);
-                }
-                if (project_native_executable_artifact_location && project_build_native_executable_command) {
+                if (project_native_executable_artifact_location && project_build_native_executable_command && folder.projectType !== 'NodeJS') {
                     // --- Generate native image build spec
                     progress.report({
                         increment,
@@ -2491,6 +2501,7 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                     logUtils.logInfo(`[deploy] ${folder.projectType !== 'Unknown' ? 'Recognized ' : ''}${folder.projectType} project in ${deployData.compartment.name}/${projectName}/${repositoryName}`);
 
                     if (project_native_executable_artifact_location && project_build_native_executable_command
+                        && folder.projectType !== 'NodeJS'
                         && (folder.projectType !== 'Helidon' || dockerFiles.get(folder)?.includes('Dockerfile.native'))) {
                         let nativeContainerRepository;
                         if (folderData.nativeContainerRepository) {
@@ -3020,10 +3031,12 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
 
                     if (project_devbuild_artifact_location && project_devbuild_command
                         && (folder.projectType !== 'Helidon' || dockerFiles.get(folder)?.includes('Dockerfile.jlink') || dockerFiles.get(folder)?.includes('Dockerfile'))) {
+                        const containerRepoType = folder.projectType === 'NodeJS' ? 'Node.js container' : 'jvm container';
+                        const containerRepoSuffix = folder.projectType === 'NodeJS' ? 'nodejs' : 'jvm';
                         let jvmContainerRepository;
                         if (folderData.jvmContainerRepository) {
                             progress.report({
-                                message: `Using already created jvm container repository for ${repositoryName}...`
+                                message: `Using already created ${containerRepoType} repository for ${repositoryName}...`
                             });
                             try {
                                 jvmContainerRepository = await ociUtils.getContainerRepository(provider, folderData.jvmContainerRepository);
@@ -3038,16 +3051,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             progress.report({
                                 increment,
                             });
-                            logUtils.logInfo(`[deploy] Using already created jvm container repository for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            logUtils.logInfo(`[deploy] Using already created ${containerRepoType} repository for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                         } else {
-                            // --- Create jvm container repository
+                            // --- Create container repository
                             progress.report({
                                 increment,
-                                message: `Creating jvm container repository for ${repositoryName}...`
+                                message: `Creating ${containerRepoType} repository for ${repositoryName}...`
                             });
-                            const containerRepositoryName = incrementalDeploy || folders.length > 1 ? `${projectName}-${repositoryName}-jvm` : `${projectName}-jvm`;
+                            const containerRepositoryName = incrementalDeploy || folders.length > 1 ? `${projectName}-${repositoryName}-${containerRepoSuffix}` : `${projectName}-${containerRepoSuffix}`;
                             try {
-                                logUtils.logInfo(`[deploy] Creating jvm container repository for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Creating ${containerRepoType} repository for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                 folderData.jvmContainerRepository = false;
                                 jvmContainerRepository = await ociUtils.createContainerRepository(provider, deployData.compartment.ocid, containerRepositoryName);
                                 folderData.jvmContainerRepository = jvmContainerRepository.id;
@@ -3059,7 +3072,7 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                     originalName: containerRepositoryName.toLowerCase()
                                 });
                             } catch (err) {
-                                resolve(dialogs.getErrorMessage(`Failed to create jvm container repository ${containerRepositoryName}`, err));
+                                resolve(dialogs.getErrorMessage(`Failed to create ${containerRepoType} repository ${containerRepositoryName}`, err));
                                 folderData.jvmContainerRepository = false;
                                 dump(deployData);
                                 return;
@@ -3067,39 +3080,79 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             dump(deployData);
                         }
 
-                        // --- Generate docker jvm image build spec
+                        // --- Generate docker container image build spec
                         progress.report({
                             increment,
-                            message: `Creating ${JVM_CONTAINER_NAME_LC} build build spec for source code repository ${repositoryName}...`
+                            message: `Creating ${folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC} build spec for source code repository ${repositoryName}...`
                         });
-                        const docker_jvmbuildspec_template = 'docker_jvmbuild_spec.yaml';
-                        const docker_jvmbuildArtifactName = `${repositoryName}_jvm_docker_image`;
-                        logUtils.logInfo(`[deploy] Creating ${JVM_CONTAINER_NAME_LC} build spec for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
-                        const docker_jvmbuildTemplate = expandTemplate(RESOURCES[folder.projectType === 'Helidon' ? 'docker_build_spec.yaml' : docker_jvmbuildspec_template], {
-                            docker_tag_value: DEFAULT_DOCKER_TAG,
-                            default_graalvm_version: DEFAULT_GRAALVM_VERSION,
-                            default_java_version: DEFAULT_JAVA_VERSION,
-                            project_build_command: project_devbuild_command,
-                            project_artifact_location: project_devbuild_artifact_location,
-                            deploy_artifact_name: docker_jvmbuildArtifactName,
-                            docker_file: dockerFiles.get(folder)?.includes('Dockerfile.jlink') ? 'Dockerfile.jlink' : 'Dockerfile',
-                            image_name: jvmContainerRepository.displayName.toLowerCase()
-                        }, folder, docker_jvmbuildspec_template);
-                        if (!docker_jvmbuildTemplate) {
-                            resolve(`Failed to configure ${JVM_CONTAINER_NAME_LC} build spec for ${repositoryName}`);
-                            return;
+                        const docker_jvmbuildspec_template = folder.projectType === 'NodeJS' ? 'docker_nodejs_build_spec.yaml' : 'docker_jvmbuild_spec.yaml';
+                        const docker_jvmbuildArtifactName = folder.projectType === 'NodeJS' ? `${repositoryName}_nodejs_docker_image` : `${repositoryName}_jvm_docker_image`;
+                        logUtils.logInfo(`[deploy] Creating ${folder.projectType === 'NodeJS' ? 'Node.js' : JVM_CONTAINER_NAME_LC} build spec for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                        if (folder.projectType === 'NodeJS') {
+                            const docker_nodejsbuildTemplate = expandTemplate(RESOURCES[docker_jvmbuildspec_template], {
+                                docker_tag_value: DEFAULT_DOCKER_TAG,
+                                default_node_version: '18',
+                                image_name: jvmContainerRepository.displayName.toLowerCase(),
+                                deploy_artifact_name: docker_jvmbuildArtifactName
+                            }, folder, docker_jvmbuildspec_template);
+                            if (!docker_nodejsbuildTemplate) {
+                                resolve(`Failed to configure Node.js Docker build spec for ${repositoryName}`);
+                                return;
+                            }
+                        } else {
+                            const docker_jvmbuildTemplate = expandTemplate(RESOURCES[folder.projectType === 'Helidon' ? 'docker_build_spec.yaml' : docker_jvmbuildspec_template], {
+                                docker_tag_value: DEFAULT_DOCKER_TAG,
+                                default_graalvm_version: DEFAULT_GRAALVM_VERSION,
+                                default_java_version: DEFAULT_JAVA_VERSION,
+                                project_build_command: project_devbuild_command,
+                                project_artifact_location: project_devbuild_artifact_location,
+                                deploy_artifact_name: docker_jvmbuildArtifactName,
+                                docker_file: dockerFiles.get(folder)?.includes('Dockerfile.jlink') ? 'Dockerfile.jlink' : 'Dockerfile',
+                                image_name: jvmContainerRepository.displayName.toLowerCase()
+                            }, folder, docker_jvmbuildspec_template);
+                            if (!docker_jvmbuildTemplate) {
+                                resolve(`Failed to configure ${JVM_CONTAINER_NAME_LC} build spec for ${repositoryName}`);
+                                return;
+                            }
                         }
-                        const docker_jvm_file = 'Dockerfile.jvm';
-                        const docker_jvmFile = expandTemplate(RESOURCES[docker_jvm_file], {}, folder, docker_jvm_file);
+                        const docker_jvm_file = folder.projectType === 'NodeJS' ? 'Dockerfile.nodejs' : 'Dockerfile.jvm';
+                        // For Node.js, we need to determine entry point and build output from package.json
+                        let dockerFileParams: any = {};
+                        if (folder.projectType === 'NodeJS') {
+                            try {
+                                const packageJsonPath = path.join(folder.uri.fsPath, 'package.json');
+                                if (fs.existsSync(packageJsonPath)) {
+                                    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+                                    dockerFileParams.entry_point = packageJson.main || 'index.js';
+                                    dockerFileParams.build_output = project_devbuild_artifact_location || '.';
+                                    dockerFileParams.copy_source = project_devbuild_artifact_location === '.';
+                                    dockerFileParams.source_files = '*';
+                                } else {
+                                    dockerFileParams.entry_point = 'index.js';
+                                    dockerFileParams.build_output = '.';
+                                    dockerFileParams.copy_source = true;
+                                    dockerFileParams.source_files = '*';
+                                }
+                            } catch (err) {
+                                logUtils.logError(`[deploy] Failed to read package.json: ${err}`);
+                                dockerFileParams.entry_point = 'index.js';
+                                dockerFileParams.build_output = '.';
+                                dockerFileParams.copy_source = true;
+                                dockerFileParams.source_files = '*';
+                            }
+                        }
+                        const docker_jvmFile = expandTemplate(RESOURCES[docker_jvm_file], dockerFileParams, folder, docker_jvm_file);
                         if (!docker_jvmFile) {
-                            resolve(`Failed to configure ${JVM_CONTAINER_NAME_LC} file for ${repositoryName}`);
+                            resolve(`Failed to configure ${folder.projectType === 'NodeJS' ? 'Node.js' : JVM_CONTAINER_NAME_LC} file for ${repositoryName}`);
                             return;
                         }
 
                         const docker_jvmbuildImage = `${provider.getRegion().regionCode}.ocir.io/${deployData.namespace}/${jvmContainerRepository.displayName}:\${DOCKER_TAG}`;
+                        const containerArtifactName = folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC;
+                        const containerArtifactNameFull = folder.projectType === 'NodeJS' ? 'Node.js Container' : JVM_CONTAINER_NAME;
                         if (folderData.docker_jvmbuildArtifact) {
                             progress.report({
-                                message: `Using already created ${JVM_CONTAINER_NAME_LC} artifact for ${repositoryName}...`
+                                message: `Using already created ${containerArtifactName} artifact for ${repositoryName}...`
                             });
                             try {
                                 const artifact = await ociUtils.getDeployArtifact(provider, folderData.docker_jvmbuildArtifact);
@@ -3114,16 +3167,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             progress.report({
                                 increment,
                             });
-                            logUtils.logInfo(`[deploy] Using already created ${JVM_CONTAINER_NAME_LC} artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            logUtils.logInfo(`[deploy] Using already created ${containerArtifactName} artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                         } else {
-                            // --- Create docker jvm image artifact
+                            // --- Create docker container image artifact
                             progress.report({
                                 increment,
-                                message: `Creating ${JVM_CONTAINER_NAME_LC} artifact for ${repositoryName}...`
+                                message: `Creating ${containerArtifactName} artifact for ${repositoryName}...`
                             });
-                            const docker_jvmbuildArtifactDescription = `Build artifact for ${JVM_CONTAINER_NAME} for devops project ${projectName} & repository ${repositoryName}`;
+                            const docker_jvmbuildArtifactDescription = `Build artifact for ${containerArtifactNameFull} for devops project ${projectName} & repository ${repositoryName}`;
                             try {
-                                logUtils.logInfo(`[deploy] Creating ${JVM_CONTAINER_NAME_LC} artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Creating ${containerArtifactName} artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                 folderData.docker_jvmbuildArtifact = false;
                                 folderData.docker_jvmbuildArtifact = (await ociUtils.createProjectDockerArtifact(provider, projectOCID, docker_jvmbuildImage, docker_jvmbuildArtifactName, docker_jvmbuildArtifactDescription, {
                                     'devops_tooling_deployID': deployData.tag,
@@ -3137,7 +3190,7 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                     originalName: docker_jvmbuildArtifactName
                                 });
                             } catch (err) {
-                                resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} artifact for ${repositoryName}`, err));
+                                resolve(dialogs.getErrorMessage(`Failed to create ${containerArtifactName} artifact for ${repositoryName}`, err));
                                 folderData.docker_jvmbuildArtifact = false;
                                 dump(deployData);
                                 return;
@@ -3145,10 +3198,10 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             dump(deployData);
                         }
 
-                        const docker_jvmbuildPipelineName = `Build ${JVM_CONTAINER_NAME}`;
+                        const docker_jvmbuildPipelineName = folder.projectType === 'NodeJS' ? `Build Node.js Container` : `Build ${JVM_CONTAINER_NAME}`;
                         if (folderData.docker_jvmbuildPipeline) {
                             progress.report({
-                                message: `Using already created build pipeline for ${JVM_CONTAINER_NAME_LC} of ${repositoryName}...`
+                                message: `Using already created build pipeline for ${folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC} of ${repositoryName}...`
                             });
                             try {
                                 const pipeline = await ociUtils.getBuildPipeline(provider, folderData.docker_jvmbuildPipeline);
@@ -3163,23 +3216,28 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             progress.report({
                                 increment,
                             });
-                            logUtils.logInfo(`[deploy] Using already created build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            logUtils.logInfo(`[deploy] Using already created build pipeline for ${folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                         } else {
-                            // --- Create docker jvm image pipeline
+                            // --- Create docker jvm/nodejs image pipeline
+                            const containerName = folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC;
                             progress.report({
                                 increment,
-                                message: `Creating build pipeline for ${JVM_CONTAINER_NAME_LC} of ${repositoryName}...`
+                                message: `Creating build pipeline for ${containerName} of ${repositoryName}...`
                             });
-                            const docker_jvmbuildPipelineDescription = `Build pipeline to build ${JVM_CONTAINER_NAME_LC} for devops project ${projectName} & repository ${repositoryName}`;
+                            const docker_jvmbuildPipelineDescription = `Build pipeline to build ${containerName} for devops project ${projectName} & repository ${repositoryName}`;
                             try {
-                                logUtils.logInfo(`[deploy] Creating build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Creating build pipeline for ${containerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                 const pipelineName = `${repositoryNamePrefix}${docker_jvmbuildPipelineName}`;
                                 folderData.docker_jvmbuildPipeline = false;
-                                folderData.docker_jvmbuildPipeline = (await ociUtils.createBuildPipeline(provider, projectOCID, pipelineName, docker_jvmbuildPipelineDescription, [
+                                const pipelineParameters = folder.projectType === 'NodeJS' ? [
+                                    { name: 'NODE_VERSION', defaultValue: '18', description: 'Node.js version, e.g. 18'},
+                                    { name: 'DOCKER_TAG', defaultValue: DEFAULT_DOCKER_TAG, description: 'Tag for the container image'}
+                                ] : [
                                     { name: 'GRAALVM_VERSION', defaultValue: DEFAULT_GRAALVM_VERSION, description: 'Major GraalVM version number, e.g. 22 for 22.2.0 release'},
                                     { name: 'JAVA_VERSION', defaultValue: DEFAULT_JAVA_VERSION, description: 'Java version of given GraalVM version e.g. 11 for GraalVM 22.2.0 JDK 11'},
                                     { name: 'DOCKER_TAG', defaultValue: DEFAULT_DOCKER_TAG, description: 'Tag for the container image'}
-                                ], {
+                                ];
+                                folderData.docker_jvmbuildPipeline = (await ociUtils.createBuildPipeline(provider, projectOCID, pipelineName, docker_jvmbuildPipelineDescription, pipelineParameters, {
                                     'devops_tooling_deployID': deployData.tag,
                                     'devops_tooling_codeRepoID': codeRepository.id,
                                     'devops_tooling_codeRepoPrefix': repositoryNamePrefix,
@@ -3194,13 +3252,15 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                     autoImport: 'true'
                                 });
                             } catch (err) {
-                                resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} build pipeline for ${repositoryName}`, err));
+                                const containerName = folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC;
+                                resolve(dialogs.getErrorMessage(`Failed to create ${containerName} build pipeline for ${repositoryName}`, err));
                                 folderData.docker_jvmbuildPipeline = false;
                                 dump(deployData);
                                 return;
                             }
                             dump(deployData);
                         }
+                        const containerName = folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC;
                         if (folderData.docker_jvmbuildPipelineBuildStage) {
                             try {
                                 const stage = await ociUtils.getBuildPipelineStage(provider, folderData.docker_jvmbuildPipelineBuildStage);
@@ -3212,16 +3272,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             }
                         }
                         if (folderData.docker_jvmbuildPipelineBuildStage) {
-                            logUtils.logInfo(`[deploy] Using already created build stage of build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            logUtils.logInfo(`[deploy] Using already created build stage of build pipeline for ${containerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                         } else {
                             try {
-                                logUtils.logInfo(`[deploy] Creating build stage of build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Creating build stage of build pipeline for ${containerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                 folderData.docker_jvmbuildPipelineBuildStage = false;
                                 folderData.docker_jvmbuildPipelineBuildStage = (await ociUtils.createBuildPipelineBuildStage(provider, folderData.docker_jvmbuildPipeline, codeRepository.id, repositoryName, codeRepository.httpUrl, `${projectUtils.getDevOpsResourcesDir()}/${docker_jvmbuildspec_template}`, false, {
                                     'devops_tooling_deployID': deployData.tag
                                 })).id;
                             } catch (err) {
-                                resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} pipeline build stage for ${repositoryName}`, err));
+                                resolve(dialogs.getErrorMessage(`Failed to create ${containerName} pipeline build stage for ${repositoryName}`, err));
                                 folderData.docker_jvmbuildPipelineBuildStage = false;
                                 dump(deployData);
                                 return;
@@ -3239,16 +3299,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             }
                         }
                         if (folderData.docker_jvmbuildPipelineArtifactsStage) {
-                            logUtils.logInfo(`[deploy] Using already created artifacts stage of build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            logUtils.logInfo(`[deploy] Using already created artifacts stage of build pipeline for ${containerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                         } else {
                             try {
-                                logUtils.logInfo(`[deploy] Creating artifacts stage of build pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Creating artifacts stage of build pipeline for ${containerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                 folderData.docker_jvmbuildPipelineArtifactsStage = false;
                                 folderData.docker_jvmbuildPipelineArtifactsStage = (await ociUtils.createBuildPipelineArtifactsStage(provider, folderData.docker_jvmbuildPipeline, folderData.docker_jvmbuildPipelineBuildStage, folderData.docker_jvmbuildArtifact, docker_jvmbuildArtifactName, {
                                     'devops_tooling_deployID': deployData.tag
                                 })).id;
                             } catch (err) {
-                                resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} pipeline artifacts stage for ${repositoryName}`, err));
+                                resolve(dialogs.getErrorMessage(`Failed to create ${containerName} pipeline artifacts stage for ${repositoryName}`, err));
                                 folderData.docker_jvmbuildPipelineArtifactsStage = false;
                                 dump(deployData);
                                 return;
@@ -3258,10 +3318,10 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                         buildPipelines.push({ 'ocid': folderData.docker_jvmbuildPipeline, 'displayName': docker_jvmbuildPipelineName });
 
                         if (deployData.okeClusterEnvironment) {
-                            // --- Create OKE jvm deployment configuration spec
+                            // --- Create OKE jvm/nodejs deployment configuration spec
                             progress.report({
                                 increment,
-                                message: `Creating OKE jvm deployment configuration development spec for ${repositoryName}...`
+                                message: `Creating OKE ${folder.projectType === 'NodeJS' ? 'Node.js' : 'jvm'} deployment configuration development spec for ${repositoryName}...`
                             });
                             const oke_deploy_jvm_config_template = 'oke_deploy_config.yaml';
                             const oke_deployJvmConfigInlineContent = expandTemplate(RESOURCES[oke_deploy_jvm_config_template], {
@@ -3290,17 +3350,19 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                 progress.report({
                                     increment,
                                 });
-                                logUtils.logInfo(`[deploy] Using already created OKE jvm deployment configuration artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                const deployConfigType = folder.projectType === 'NodeJS' ? 'Node.js container' : 'jvm container';
+                                logUtils.logInfo(`[deploy] Using already created OKE ${deployConfigType} deployment configuration artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             } else if (folder.projectType !== 'Unknown') {
-                                // --- Create OKE jvm deployment configuration artifact
+                                // --- Create OKE deployment configuration artifact
+                                const deployConfigType = folder.projectType === 'NodeJS' ? 'Node.js container' : 'jvm container';
                                 progress.report({
                                     increment,
-                                    message: `Creating OKE jvm deployment configuration artifact for ${repositoryName}...`
+                                    message: `Creating OKE ${deployConfigType} deployment configuration artifact for ${repositoryName}...`
                                 });
-                                const oke_deployJvmConfigArtifactName = `${repositoryName}_oke_deploy_jvm_configuration`;
-                                const oke_deployJvmConfigArtifactDescription = `OKE jvm deployment configuration artifact for devops project ${projectName} & repository ${repositoryName}`;
+                                const oke_deployJvmConfigArtifactName = folder.projectType === 'NodeJS' ? `${repositoryName}_oke_deploy_nodejs_configuration` : `${repositoryName}_oke_deploy_jvm_configuration`;
+                                const oke_deployJvmConfigArtifactDescription = `OKE ${deployConfigType} deployment configuration artifact for devops project ${projectName} & repository ${repositoryName}`;
                                 try {
-                                    logUtils.logInfo(`[deploy] Creating OKE jvm deployment configuration artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    logUtils.logInfo(`[deploy] Creating OKE ${deployConfigType} deployment configuration artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                     folderData.oke_deployJvmConfigArtifact = false;
                                     folderData.oke_deployJvmConfigArtifact = (await ociUtils.createOkeDeployConfigurationArtifact(provider, projectOCID, oke_deployJvmConfigInlineContent, oke_deployJvmConfigArtifactName, oke_deployJvmConfigArtifactDescription, {
                                         'devops_tooling_deployID': deployData.tag,
@@ -3315,7 +3377,7 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                         originalName: oke_deployJvmConfigArtifactName
                                     });
                                 } catch (err) {
-                                    resolve(dialogs.getErrorMessage(`Failed to create OKE jvm deployment configuration artifact for ${repositoryName}`, err));
+                                    resolve(dialogs.getErrorMessage(`Failed to create OKE ${deployConfigType} deployment configuration artifact for ${repositoryName}`, err));
                                     folderData.oke_deployJvmConfigArtifact = false;
                                     dump(deployData);
                                     return;
@@ -3325,10 +3387,73 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                 folderData.oke_deployJvmConfigArtifact = false;
                             }
 
-                            const oke_deployJvmPipelineName = `Deploy ${JVM_CONTAINER_NAME} to OKE`;
+                            // --- Create OKE ConfigMap
+                            progress.report({
+                                increment,
+                                message: `Creating OKE ConfigMap for ${repositoryName}...`
+                            });
+                            const oke_configmap_template = 'oke_configmap.yaml';
+                            const oke_configMapInlineContent = expandTemplate(RESOURCES[oke_configmap_template], {
+                                app_name: repositoryName.toLowerCase().replace(/[^0-9a-z]+/g, '-')
+                            });
+                            if (!oke_configMapInlineContent) {
+                                resolve(`Failed to create OKE ConfigMap for ${repositoryName}`);
+                                return;
+                            }
+                            if (folderData.oke_configMapArtifact) {
+                                progress.report({
+                                    message: `Using already created OKE ConfigMap artifact for ${repositoryName}...`
+                                });
+                                try {
+                                    const artifact = await ociUtils.getDeployArtifact(provider, folderData.oke_configMapArtifact);
+                                    if (!artifact) {
+                                        folderData.oke_configMapArtifact = undefined;
+                                    }
+                                } catch (err) {
+                                    folderData.oke_configMapArtifact = undefined;
+                                }
+                            }
+                            if (folderData.oke_configMapArtifact) {
+                                progress.report({
+                                    increment,
+                                });
+                                logUtils.logInfo(`[deploy] Using already created OKE ConfigMap artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                            } else {
+                                // --- Create OKE ConfigMap artifact
+                                progress.report({
+                                    increment,
+                                    message: `Creating OKE ConfigMap artifact for ${repositoryName}...`
+                                });
+                                const oke_configMapArtifactName = `${repositoryName}_oke_configmap`;
+                                const oke_configMapArtifactArtifactDescription = `OKE ConfigMap for devops project ${projectName} & repository ${repositoryName}`;
+                                try {
+                                    logUtils.logInfo(`[deploy] Creating OKE ConfigMap artifact for ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    folderData.oke_configMapArtifact = false;
+                                    folderData.oke_configMapArtifact = (await ociUtils.createOkeDeployConfigurationArtifactNoSubstitute(provider, projectOCID, oke_configMapInlineContent, oke_configMapArtifactName, oke_configMapArtifactArtifactDescription, {
+                                        'devops_tooling_deployID': deployData.tag,
+                                        'devops_tooling_codeRepoID': codeRepository.id
+                                    })).id;
+                                    if (!codeRepoResources.artifacts) {
+                                        codeRepoResources.artifacts = [];
+                                    }
+                                    codeRepoResources.artifacts.push({
+                                        ocid: folderData.oke_configMapArtifact,
+                                        originalName: oke_configMapArtifactName
+                                    });
+                                } catch (err) {
+                                    resolve(dialogs.getErrorMessage(`Failed to create OKE ConfigMap artifact for ${repositoryName}`, err));
+                                    folderData.oke_configMapArtifact = false;
+                                    dump(deployData);
+                                    return;
+                                }
+                                dump(deployData);
+                            }
+
+                            const oke_deployJvmPipelineName = folder.projectType === 'NodeJS' ? `Deploy Node.js Container to OKE` : `Deploy ${JVM_CONTAINER_NAME} to OKE`;
+                            const deployContainerName = folder.projectType === 'NodeJS' ? 'Node.js container' : JVM_CONTAINER_NAME_LC;
                             if (folderData.oke_deployJvmPipeline) {
                                 progress.report({
-                                    message: `Using already created deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${repositoryName}...`
+                                    message: `Using already created deployment to OKE pipeline for ${deployContainerName} of ${repositoryName}...`
                                 });
                                 try {
                                     const pipeline = await ociUtils.getDeployPipeline(provider, folderData.oke_deployJvmPipeline);
@@ -3343,16 +3468,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                 progress.report({
                                     increment,
                                 });
-                                logUtils.logInfo(`[deploy] Using already created deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Using already created deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             } else if (folder.projectType !== 'Unknown') {
-                                // --- Create OKE jvm deployment pipeline
+                                // --- Create OKE jvm/nodejs deployment pipeline
                                 progress.report({
                                     increment,
-                                    message: `Creating deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${repositoryName}...`
+                                    message: `Creating deployment to OKE pipeline for ${deployContainerName} of ${repositoryName}...`
                                 });
-                                const oke_deployJvmPipelineDescription = `Deployment pipeline to deploy ${JVM_CONTAINER_NAME_LC} for devops project ${projectName} & repository ${repositoryName} to OKE`;
+                                const oke_deployJvmPipelineDescription = `Deployment pipeline to deploy ${deployContainerName} for devops project ${projectName} & repository ${repositoryName} to OKE`;
                                 try {
-                                    logUtils.logInfo(`[deploy] Creating deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    logUtils.logInfo(`[deploy] Creating deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                     const pipelineName = `${repositoryNamePrefix}${oke_deployJvmPipelineName}`;
                                     folderData.oke_deployJvmPipeline = false;
                                     folderData.oke_deployJvmPipeline = (await ociUtils.createDeployPipeline(provider, projectOCID, pipelineName, oke_deployJvmPipelineDescription, [
@@ -3373,14 +3498,14 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                         autoImport: 'true'
                                     });
                                 } catch (err) {
-                                    resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} deployment to OKE pipeline for ${repositoryName}`, err));
+                                    resolve(dialogs.getErrorMessage(`Failed to create ${deployContainerName} deployment to OKE pipeline for ${repositoryName}`, err));
                                     folderData.oke_deployJvmPipeline = false;
                                     dump(deployData);
                                     return;
                                 }
                                 dump(deployData);
                             } else {
-                                logUtils.logInfo(`[deploy] Skipped creating deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC}`);
+                                logUtils.logInfo(`[deploy] Skipped creating deployment to OKE pipeline for ${deployContainerName}`);
                                 folderData.oke_deployJvmPipeline = false;  
                             }
                             if (folderData.podDeletionForDeployJvmStage) {
@@ -3395,16 +3520,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                             }
 
                             if (folderData.podDeletionForDeployJvmStage) {
-                                logUtils.logInfo(`[deploy] Using already created pod deletion stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Using already created pod deletion stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             } else if (folderData.oke_deployJvmPipeline) {
                                 try {
-                                    logUtils.logInfo(`[deploy] Creating pod deletion stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    logUtils.logInfo(`[deploy] Creating pod deletion stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                     folderData.podDeletionForDeployJvmStage = false;
                                     folderData.podDeletionForDeployJvmStage = (await ociUtils.createSetupKubernetesPodDeletionStage(provider, folderData.oke_deployJvmPipeline, folderData.oke_podDeletionCommandArtifact, deployData.subnet.id, {
                                         'devops_tooling_deployID': deployData.tag
                                     })).id;
                                 } catch (err) {
-                                    resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} pod deletion stage for ${repositoryName}`, err));
+                                    resolve(dialogs.getErrorMessage(`Failed to create ${deployContainerName} pod deletion stage for ${repositoryName}`, err));
                                     folderData.podDeletionForDeployJvmStage = false;
                                     dump(deployData);
                                     return;
@@ -3425,16 +3550,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                 }
                             }
                             if (folderData.deployJvmToOkeStage) {
-                                logUtils.logInfo(`[deploy] Using already created deploy to OKE stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Using already created deploy to OKE stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             } else if (folderData.oke_deployJvmPipeline) {
                                 try {
-                                    logUtils.logInfo(`[deploy] Creating deploy to OKE stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    logUtils.logInfo(`[deploy] Creating deploy to OKE stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                     folderData.deployJvmToOkeStage = false;
                                     folderData.deployJvmToOkeStage = (await ociUtils.createDeployToOkeStage('Deploy to OKE', provider, folderData.oke_deployJvmPipeline, folderData.podDeletionForDeployJvmStage, deployData.okeClusterEnvironment, folderData.oke_deployJvmConfigArtifact, {
                                         'devops_tooling_deployID': deployData.tag
                                     })).id;
                                 } catch (err) {
-                                    resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} deployment to OKE stage for ${repositoryName}`, err));
+                                    resolve(dialogs.getErrorMessage(`Failed to create ${deployContainerName} deployment to OKE stage for ${repositoryName}`, err));
                                     folderData.deployJvmToOkeStage = false;
                                     dump(deployData);
                                     return;
@@ -3455,16 +3580,16 @@ export async function deployFolders(folders: vscode.WorkspaceFolder[], addToExis
                                 }
                             }
                             if (folderData.applyConfigMapStage) {
-                                logUtils.logInfo(`[deploy] Using already created apply ConfigMap stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                logUtils.logInfo(`[deploy] Using already created apply ConfigMap stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                             } else if (folderData.oke_deployJvmPipeline) {
                                 try {
-                                    logUtils.logInfo(`[deploy] Creating apply ConfigMap stage of deployment to OKE pipeline for ${JVM_CONTAINER_NAME_LC} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
+                                    logUtils.logInfo(`[deploy] Creating apply ConfigMap stage of deployment to OKE pipeline for ${deployContainerName} of ${deployData.compartment.name}/${projectName}/${repositoryName}`);
                                     folderData.applyConfigMapStage = false;
                                     folderData.applyConfigMapStage = (await ociUtils.createDeployToOkeStage('Apply ConfigMap', provider, folderData.oke_deployJvmPipeline, folderData.oke_deployJvmPipeline, deployData.okeClusterEnvironment, folderData.oke_configMapArtifact, {
                                         'devops_tooling_deployID': deployData.tag
                                     })).id;
                                 } catch (err) {
-                                    resolve(dialogs.getErrorMessage(`Failed to create ${JVM_CONTAINER_NAME_LC} apply ConfigMap stage for ${repositoryName}`, err));
+                                    resolve(dialogs.getErrorMessage(`Failed to create ${deployContainerName} apply ConfigMap stage for ${repositoryName}`, err));
                                     folderData.applyConfigMapStage = false;
                                     dump(deployData);
                                     return;

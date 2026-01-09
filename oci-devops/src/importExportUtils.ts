@@ -14,6 +14,7 @@ import * as folderStorage from './folderStorage';
 import * as undeployUtils from './oci/undeployUtils'; // TODO: include into CloudSupport API?
 import { DeployOptions } from './oci/deployUtils';
 import { logError } from '../../common/lib/logUtils';
+import * as projectUtils from './projectUtils';
 
 
 let importInProgress: boolean;
@@ -112,6 +113,16 @@ export async function deployFolders(workspaceState: vscode.Memento, addToExistin
             }
             for (const folder of folders) {
                 try {
+                    // Check project type first
+                    const projectFolder = await projectUtils.getProjectFolder(folder.folder);
+                    
+                    // For Node.js projects, skip NBLS check (it's Java-specific)
+                    if (projectFolder.projectType === 'NodeJS') {
+                        supportedFolders.push(folder);
+                        continue;
+                    }
+                    
+                    // For Java projects, verify with NBLS
                     await vscode.window.withProgress({
                         location: vscode.ProgressLocation.Notification,
                         title: `Inspecting folder ${folder.folder.name}...`,
@@ -121,7 +132,13 @@ export async function deployFolders(workspaceState: vscode.Memento, addToExistin
                     });
                     supportedFolders.push(folder);
                 } catch (err) {
-                    showErrorMessage(`Folder ${folder.folder.name} does not immediately contain a Java project, cannot create OCI DevOps project.`);
+                    const projectFolder = await projectUtils.getProjectFolder(folder.folder).catch(() => null);
+                    if (projectFolder?.projectType === 'NodeJS') {
+                        // Node.js project, add it anyway
+                        supportedFolders.push(folder);
+                    } else {
+                        showErrorMessage(`Folder ${folder.folder.name} does not immediately contain a supported project (Java or Node.js), cannot create OCI DevOps project.`);
+                    }
                 }
             }
             if (!supportedFolders.length) {

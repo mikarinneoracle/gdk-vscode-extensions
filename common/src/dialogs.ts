@@ -8,7 +8,7 @@
 import * as vscode from 'vscode';
 import * as logUtils from './logUtils';
 
-export type ProjectType = "GDK" | "Micronaut";
+export type ProjectType = "GDK" | "Micronaut" | "NodeJS";
 
 /**
  * Handles the creation of a new GDK project.

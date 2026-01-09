@@ -1,0 +1,60 @@
+#####################################################################
+# Copyright (c) 2022, 2024, Oracle and/or its affiliates. All rights reserved.
+# DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+#
+# Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl.
+#####################################################################
+
+#####################################################################
+#
+# OCI DevOps Tools Build Pipeline Spec for Node.js Docker Image
+# Builds application Docker image and deploys it to Container Registry
+#
+# Build pipeline accepts these optional parameters:
+# NODE_VERSION - Node.js version, e.g. 18
+# DOCKER_TAG - Docker image tag
+#
+#####################################################################
+version: 0.1
+component: build
+timeoutInSeconds: 15000
+runAs: root
+shell: bash
+env:
+  exportedVariables:
+    - NODE_VERSION
+steps:
+  - type: Command
+    name: "Install Node.js"
+    timeoutInSeconds: 300
+    command: |
+      if [ ! -n "${NODE_VERSION}" ]; then export NODE_VERSION={{{default_node_version}}}; fi
+      echo "Node.js Version: ${NODE_VERSION}"
+      microdnf install -y nodejs npm
+      node --version
+      npm --version
+  - type: Command
+    name: "Define docker image tag"
+    timeoutInSeconds: 40
+    command: |
+      echo "OCI_BUILD_RUN_ID: ${OCI_BUILD_RUN_ID}"
+      if [ ! -n "${DOCKER_TAG}" ]; then export DOCKER_TAG={{{docker_tag_value}}}; fi
+      echo "DOCKER_TAG: ${DOCKER_TAG}"
+  - type: Command
+    name: "Docker build"
+    command: |
+      echo "Running docker image build."
+      echo "Docker Image Tag: ${DOCKER_TAG}"
+      docker build -f ./.devops/Dockerfile.nodejs \
+                  -t {{{image_name}}}:${DOCKER_TAG} .
+      echo "Done"
+      printf "List of docker images:\n $(docker images)"
+outputArtifacts:
+  - name: {{{deploy_artifact_name}}}
+    type: DOCKER_IMAGE
+    location: {{{image_name}}}:${DOCKER_TAG}
+
+
+
+
+

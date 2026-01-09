@@ -1,0 +1,61 @@
+#####################################################################
+# Copyright (c) 2022, 2024, Oracle and/or its affiliates. All rights reserved.
+# DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+#
+# Licensed under the Universal Permissive License v 1.0 as shown at https://oss.oracle.com/licenses/upl.
+#####################################################################
+
+#####################################################################
+#
+# OCI DevOps Tools Build Pipeline Spec for Node.js
+# Builds application and deploys it to Artifact Registry
+#
+# Build pipeline accepts these optional parameters:
+# NODE_VERSION - Node.js version, e.g. 18
+#
+# Set this Parameter for Build Pipeline either in OCI UI or when calling the build from IDE
+# Example Node.js 18:
+# NODE_VERSION : "18"
+# Example Node.js 20:
+# NODE_VERSION : "20"
+#####################################################################
+version: 0.1
+component: build
+timeoutInSeconds: 15000
+runAs: root
+shell: bash
+env:
+  exportedVariables:
+    - NODE_VERSION
+steps:
+  - type: Command
+    name: "Install Node.js"
+    timeoutInSeconds: 300
+    command: |
+      if [ ! -n "${NODE_VERSION}" ]; then export NODE_VERSION={{{default_node_version}}}; fi
+      echo "Node.js Version: ${NODE_VERSION}"
+      microdnf install -y nodejs npm
+      node --version
+      npm --version
+  - type: Command
+    name: "Install dependencies and build"
+    timeoutInSeconds: 600
+    command: |
+      echo "Executing build command: {{{project_build_command}}}"
+      {{{project_build_command}}}
+    onFailure:
+      - type: Command
+        command: |
+          echo "Build failed"
+          echo "Failure successfully handled"
+        timeoutInSeconds: 40
+        runAs: root
+outputArtifacts:
+  - name: {{{deploy_artifact_name}}}
+    type: BINARY
+    location: ${OCI_PRIMARY_SOURCE_DIR}/{{{project_artifact_location}}}
+
+
+
+
+

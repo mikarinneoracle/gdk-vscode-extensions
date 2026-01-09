@@ -1,0 +1,120 @@
+FROM container-registry.oracle.com/os/oraclelinux:8-slim AS builder
+
+ARG NODE_VERSION=18
+RUN microdnf install -y nodejs npm && \
+    microdnf clean all
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Remove package-lock.json if it exists (may have been created with invalid package name)
+RUN rm -f package-lock.json || true
+
+# Validate and fix package.json if needed (e.g., invalid package name with spaces)
+RUN node -e " \
+  try { \
+    const fs = require('fs'); \
+    const pkgPath = 'package.json'; \
+    if (!fs.existsSync(pkgPath)) { \
+      console.error('package.json not found'); \
+      process.exit(1); \
+    } \
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); \
+    if (pkg.name) { \
+      const oldName = pkg.name; \
+      const isValid = /^[a-z0-9._-]+$/.test(pkg.name.toLowerCase()); \
+      if (!isValid) { \
+        pkg.name = pkg.name.toLowerCase() \
+          .replace(/[^a-z0-9._-]/g, '-') \
+          .replace(/^-+|-+$/g, '') \
+          .replace(/\.{2,}/g, '.') \
+          .substring(0, 214); \
+        if (!pkg.name) pkg.name = 'app'; \
+        console.log('Fixed invalid package name: \"' + oldName + '\" -> \"' + pkg.name + '\"'); \
+        fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n'); \
+      } else { \
+        console.log('Package name is valid: ' + pkg.name); \
+      } \
+    } \
+  } catch (e) { \
+    console.error('Error fixing package.json:', e.message); \
+    process.exit(1); \
+  } \
+" && cat package.json | grep -A 1 '"name"' || true
+
+# Install dependencies
+# Use npm install instead of npm ci for better compatibility
+# npm ci requires exact package-lock.json match and can fail with version mismatches
+RUN npm install --no-audit --no-fund
+
+# Copy application files
+COPY . .
+
+# Fix package.json again in case COPY overwrote it with original invalid name
+RUN node -e " \
+  try { \
+    const fs = require('fs'); \
+    const pkgPath = 'package.json'; \
+    if (fs.existsSync(pkgPath)) { \
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); \
+      if (pkg.name) { \
+        const oldName = pkg.name; \
+        const isValid = /^[a-z0-9._-]+$/.test(pkg.name.toLowerCase()); \
+        if (!isValid) { \
+          pkg.name = pkg.name.toLowerCase() \
+            .replace(/[^a-z0-9._-]/g, '-') \
+            .replace(/^-+|-+$/g, '') \
+            .replace(/\.{2,}/g, '.') \
+            .substring(0, 214); \
+          if (!pkg.name) pkg.name = 'app'; \
+          console.log('Fixed invalid package name after COPY: \"' + oldName + '\" -> \"' + pkg.name + '\"'); \
+          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n'); \
+        } \
+      } \
+    } \
+  } catch (e) { \
+    console.error('Error fixing package.json after COPY:', e.message); \
+    process.exit(1); \
+  } \
+"
+
+# Build application (only if build script exists)
+RUN HAS_BUILD=$(node -p "try{require('./package.json').scripts.build?'yes':'no'}catch(e){'no'}") && \
+    if [ "$HAS_BUILD" = "yes" ]; then \
+      echo "Build script found, running npm run build"; \
+      npm run build; \
+    else \
+      echo "No build script found in package.json, skipping build step"; \
+    fi
+
+# Runtime stage
+FROM container-registry.oracle.com/os/oraclelinux:8-slim
+
+ARG NODE_VERSION=18
+RUN microdnf install -y nodejs npm && \
+    microdnf clean all
+
+WORKDIR /app
+
+# Copy package files from builder stage (includes package-lock.json if it exists)
+COPY --from=builder /app/package*.json ./
+
+# Install production dependencies only
+# Use npm install --production as it's more compatible and handles missing package-lock.json gracefully
+RUN npm install --production --no-audit --no-fund
+
+# Copy built application from builder stage
+{{#if build_output}}
+COPY --from=builder /app/{{{build_output}}} ./
+{{else}}
+COPY --from=builder /app ./
+{{/if}}
+
+EXPOSE 3000
+
+# Start application
+# Use package.json start script or default to node
+CMD ["sh", "-c", "if [ -f package.json ] && [ -n \"$(node -p 'require(\"./package.json\").scripts.start') ]; then npm start; else node {{{entry_point}}}; fi"]
+

@@ -61,6 +61,20 @@ interface DependencyResult {
 }
 
 export async function getProjectFolder(folder: vscode.WorkspaceFolder): Promise<ProjectFolder> {
+    // Check for Node.js project first (doesn't require NBLS)
+    const packageJsonPath = path.join(folder.uri.fsPath, 'package.json');
+    if (fs.existsSync(packageJsonPath)) {
+        let buildSystem: BuildSystemType = 'NPM';
+        if (fs.existsSync(path.join(folder.uri.fsPath, 'yarn.lock'))) {
+            buildSystem = 'Yarn';
+        } else if (fs.existsSync(path.join(folder.uri.fsPath, 'pnpm-lock.yaml'))) {
+            buildSystem = 'PNPM';
+        }
+        const projectType: ProjectType = 'NodeJS';
+        logInfo(`[project] Detected Node.js project with build system: ${buildSystem}`);
+        return Object.assign({}, folder, { projectType, buildSystem, subprojects: [] });
+    }
+
     const infos: any[] = await vscode.commands.executeCommand(GET_PROJECT_INFO, folder.uri.toString(), { projectStructure: true });
     if (infos?.length && infos[0]) {
         const buildSystem: BuildSystemType | undefined = infos[0].projectType.includes('gradle') ? 'Gradle' : infos[0].projectType.includes('maven') ? 'Maven' : undefined;
@@ -190,6 +204,15 @@ export async function getProjectFolder(folder: vscode.WorkspaceFolder): Promise<
 }
 
 export async function getProjectBuildCommand(folder: ProjectFolder, subfolder: string = 'oci', includeTests: boolean = false):  Promise<string | undefined> {
+    if (folder.projectType === 'NodeJS') {
+        if (folder.buildSystem === 'Yarn') {
+            return `yarn install${includeTests ? '' : ' --ignore-scripts'} && yarn build`;
+        } else if (folder.buildSystem === 'PNPM') {
+            return `pnpm install${includeTests ? '' : ' --ignore-scripts'} && pnpm build`;
+        } else {
+            return `npm install${includeTests ? '' : ' --ignore-scripts'} && npm run build`;
+        }
+    }
     if (isMaven(folder)) {
         if (folder.projectType === 'Micronaut' || folder.projectType === 'SpringBoot') {
             return `chmod 777 ./mvnw && ./mvnw package --no-transfer-progress${includeTests ? '' : ' -DskipTests'}`;
@@ -363,6 +386,41 @@ function tryReadGradleToolchainJavaVersion(folder: string): string | undefined {
 }
 
 export async function getProjectBuildArtifactLocation(folder: ProjectFolder, subfolder: string = 'oci', shaded : boolean = true): Promise<string | undefined> {
+    if (folder.projectType === 'NodeJS') {
+        // Check package.json for output directory
+        const packageJsonPath = path.join(folder.uri.fsPath, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+            try {
+                const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+                // Check for framework-specific output directories
+                if (fs.existsSync(path.join(folder.uri.fsPath, '.next'))) {
+                    return '.next'; // Next.js
+                }
+                if (fs.existsSync(path.join(folder.uri.fsPath, 'dist'))) {
+                    return 'dist';
+                }
+                if (fs.existsSync(path.join(folder.uri.fsPath, 'build'))) {
+                    return 'build';
+                }
+                if (fs.existsSync(path.join(folder.uri.fsPath, 'out'))) {
+                    return 'out';
+                }
+                // If package.json has a main field pointing to a built file, use its directory
+                if (packageJson.main) {
+                    const mainPath = path.dirname(packageJson.main);
+                    if (mainPath !== '.' && fs.existsSync(path.join(folder.uri.fsPath, mainPath))) {
+                        return mainPath;
+                    }
+                }
+                // Default to root directory for simple apps
+                return '.';
+            } catch (err) {
+                logError(`[project] Failed to read package.json: ${err}`);
+                return '.';
+            }
+        }
+        return '.';
+    }
     const projectPath: string = folder.uri.path;
     let artifacts: any[] | undefined = undefined;
     let opts : any = {};
@@ -413,6 +471,11 @@ export async function getProjectBuildArtifactLocation(folder: ProjectFolder, sub
 }
 
 export async function getProjectNativeExecutableArtifactLocation(folder: ProjectFolder, subfolder: string = 'oci'): Promise<string | undefined> {
+    // Node.js doesn't have native executables in the same way as Java
+    // Could use pkg/nexe in the future, but for now return undefined
+    if (folder.projectType === 'NodeJS') {
+        return undefined;
+    }
     const projectPath: string = folder.uri.path;
     let artifacts: any[] | undefined = undefined;
     if (folder.projectType === 'GDK') {
@@ -454,8 +517,8 @@ export function getDockerfiles(folder: ProjectFolder): string[] {
     return fs.readdirSync(folder.uri.fsPath).filter(name => name === 'Dockerfile' || name.startsWith('Dockerfile.'));
 }
 
-export type ProjectType = 'GDK' | 'Micronaut' | 'SpringBoot' | 'Helidon' | 'Unknown';
-export type BuildSystemType = 'Maven' | 'Gradle';
+export type ProjectType = 'GDK' | 'Micronaut' | 'SpringBoot' | 'Helidon' | 'NodeJS' | 'Unknown';
+export type BuildSystemType = 'Maven' | 'Gradle' | 'NPM' | 'Yarn' | 'PNPM';
 
 export interface ProjectFolder extends vscode.WorkspaceFolder {
     readonly projectType: ProjectType;
@@ -476,6 +539,30 @@ function isGradle(folder: ProjectFolder) {
     }
     return fs.existsSync(path.join(folder.uri.fsPath, 'gradlew'));
 }
+
+// Helper functions for Node.js build system detection (currently unused but kept for future use)
+// function isNPM(folder: ProjectFolder) {
+//     if (folder.buildSystem) {
+//         return folder.buildSystem === 'NPM';
+//     }
+//     return fs.existsSync(path.join(folder.uri.fsPath, 'package.json')) && 
+//            !fs.existsSync(path.join(folder.uri.fsPath, 'yarn.lock')) &&
+//            !fs.existsSync(path.join(folder.uri.fsPath, 'pnpm-lock.yaml'));
+// }
+
+// function isYarn(folder: ProjectFolder) {
+//     if (folder.buildSystem) {
+//         return folder.buildSystem === 'Yarn';
+//     }
+//     return fs.existsSync(path.join(folder.uri.fsPath, 'yarn.lock'));
+// }
+
+// function isPNPM(folder: ProjectFolder) {
+//     if (folder.buildSystem) {
+//         return folder.buildSystem === 'PNPM';
+//     }
+//     return fs.existsSync(path.join(folder.uri.fsPath, 'pnpm-lock.yaml'));
+// }
 
 function delay(ms: number) {
     return new Promise( resolve => setTimeout(resolve, ms) );
