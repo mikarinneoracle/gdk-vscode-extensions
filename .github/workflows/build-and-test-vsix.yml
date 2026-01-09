@@ -267,40 +267,70 @@ jobs:
         
         # Start container in background
         CONTAINER_ID=$(docker run -d -p 3000:3000 test-nodejs-app:latest)
+        echo "Container ID: $CONTAINER_ID"
         
-        # Wait for container to start
-        sleep 5
+        # Show container status immediately
+        echo "Container status:"
+        docker ps -a | grep "$CONTAINER_ID" || docker ps -a
         
-        # Check if container is running
-        if ! docker ps | grep -q "$CONTAINER_ID"; then
-          echo "❌ Container failed to start"
-          docker logs "$CONTAINER_ID"
+        # Wait for container to start and show logs
+        echo "Waiting for container to start..."
+        sleep 3
+        
+        # Show container logs
+        echo "Container logs:"
+        docker logs "$CONTAINER_ID" || true
+        
+        # Check container status more reliably
+        CONTAINER_STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_ID" 2>/dev/null || echo "unknown")
+        echo "Container status: $CONTAINER_STATUS"
+        
+        if [ "$CONTAINER_STATUS" != "running" ]; then
+          echo "❌ Container is not running (status: $CONTAINER_STATUS)"
+          echo "Full container logs:"
+          docker logs "$CONTAINER_ID" || true
+          echo "Container details:"
+          docker inspect "$CONTAINER_ID" || true
+          docker rm "$CONTAINER_ID" || true
           exit 1
         fi
         
+        # Wait a bit more for the app to be ready
+        sleep 2
+        
         # Test HTTP endpoint
         echo "Testing HTTP endpoint..."
-        for i in {1..10}; do
-          if curl -f http://localhost:3000/ >/dev/null 2>&1; then
-            echo "✅ Container is responding to HTTP requests"
+        HTTP_SUCCESS=false
+        for i in {1..15}; do
+          if curl -f -s http://localhost:3000/ >/dev/null 2>&1; then
+            echo "✅ Container is responding to HTTP requests (attempt $i)"
             RESPONSE=$(curl -s http://localhost:3000/)
             if echo "$RESPONSE" | grep -q "Hello World"; then
               echo "✅ Container returned expected response: $RESPONSE"
+              HTTP_SUCCESS=true
               break
             else
               echo "⚠️  Unexpected response: $RESPONSE"
             fi
-          fi
-          if [ $i -eq 10 ]; then
-            echo "❌ Container did not respond after 10 attempts"
-            docker logs "$CONTAINER_ID"
-            docker stop "$CONTAINER_ID" || true
-            exit 1
+          else
+            echo "Waiting for HTTP endpoint... (attempt $i/15)"
           fi
           sleep 2
         done
         
+        if [ "$HTTP_SUCCESS" != "true" ]; then
+          echo "❌ Container did not respond to HTTP requests after 15 attempts"
+          echo "Container logs:"
+          docker logs "$CONTAINER_ID" || true
+          echo "Container status:"
+          docker ps -a | grep "$CONTAINER_ID" || docker ps -a
+          docker stop "$CONTAINER_ID" || true
+          docker rm "$CONTAINER_ID" || true
+          exit 1
+        fi
+        
         # Stop and remove container
+        echo "Stopping container..."
         docker stop "$CONTAINER_ID" || true
         docker rm "$CONTAINER_ID" || true
         
