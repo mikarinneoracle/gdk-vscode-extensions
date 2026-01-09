@@ -122,19 +122,17 @@ ENV NODE_ENTRY_POINT={{{entry_point}}}
 ENV NODE_ENTRY_POINT=index.js
 {{/if}}
 
-RUN cat > /app/start.sh << 'EOFSCRIPT' && \
-#!/bin/sh
-if [ -f package.json ]; then
-  HAS_START=$(node -p "try{require('./package.json').scripts.start?'yes':'no'}catch(e){'no'}")
-  if [ "$HAS_START" = "yes" ]; then
-    npm start
-  else
-    node "$NODE_ENTRY_POINT"
-  fi
-else
-  node "$NODE_ENTRY_POINT"
-fi
-EOFSCRIPT
+RUN echo '#!/bin/sh' > /app/start.sh && \
+    echo 'if [ -f package.json ]; then' >> /app/start.sh && \
+    echo '  HAS_START=$(node -p "try{require(\"./package.json\").scripts.start?\"yes\":\"no\"}catch(e){\"no\"}")' >> /app/start.sh && \
+    echo '  if [ "$HAS_START" = "yes" ]; then' >> /app/start.sh && \
+    echo '    npm start' >> /app/start.sh && \
+    echo '  else' >> /app/start.sh && \
+    echo '    node "$NODE_ENTRY_POINT"' >> /app/start.sh && \
+    echo '  fi' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '  node "$NODE_ENTRY_POINT"' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
     chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
