@@ -30,7 +30,7 @@ jobs:
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
     - name: Cache node modules
       uses: actions/cache@v4
@@ -112,7 +112,7 @@ jobs:
         cat > Dockerfile.test << 'DOCKERFILE_EOF'
         FROM container-registry.oracle.com/os/oraclelinux:8-slim AS builder
         
-        ARG NODE_VERSION=18
+        ARG NODE_VERSION=20
         RUN microdnf install -y nodejs npm && \
             microdnf clean all
         
@@ -200,7 +200,7 @@ jobs:
         # Runtime stage
         FROM container-registry.oracle.com/os/oraclelinux:8-slim
         
-        ARG NODE_VERSION=18
+        ARG NODE_VERSION=20
         RUN microdnf install -y nodejs npm && \
             microdnf clean all
         
