@@ -217,7 +217,24 @@ jobs:
         
         EXPOSE 3000
         
-        CMD ["node", "index.js"]
+        # Use the same start script approach as the actual template
+        ENV NODE_ENTRY_POINT=index.js
+        RUN cat > /app/start.sh << 'EOFSCRIPT' && \
+#!/bin/sh
+if [ -f package.json ]; then
+  HAS_START=$(node -p "try{require('./package.json').scripts.start?'yes':'no'}catch(e){'no'}")
+  if [ "$HAS_START" = "yes" ]; then
+    npm start
+  else
+    node "$NODE_ENTRY_POINT"
+  fi
+else
+  node "$NODE_ENTRY_POINT"
+fi
+EOFSCRIPT
+    chmod +x /app/start.sh
+        
+        CMD ["/app/start.sh"]
         DOCKERFILE_EOF
         
         # Test Docker build
@@ -243,6 +260,54 @@ jobs:
         
         echo "Docker build test completed successfully"
 
+    - name: Test Docker image runtime
+      run: |
+        cd /tmp/test-nodejs-app
+        
+        # Test that the container starts and responds
+        echo "Testing Docker container runtime..."
+        
+        # Start container in background
+        CONTAINER_ID=$(docker run -d -p 3000:3000 test-nodejs-app:latest)
+        
+        # Wait for container to start
+        sleep 5
+        
+        # Check if container is running
+        if ! docker ps | grep -q "$CONTAINER_ID"; then
+          echo "❌ Container failed to start"
+          docker logs "$CONTAINER_ID"
+          exit 1
+        fi
+        
+        # Test HTTP endpoint
+        echo "Testing HTTP endpoint..."
+        for i in {1..10}; do
+          if curl -f http://localhost:3000/ >/dev/null 2>&1; then
+            echo "✅ Container is responding to HTTP requests"
+            RESPONSE=$(curl -s http://localhost:3000/)
+            if echo "$RESPONSE" | grep -q "Hello World"; then
+              echo "✅ Container returned expected response: $RESPONSE"
+              break
+            else
+              echo "⚠️  Unexpected response: $RESPONSE"
+            fi
+          fi
+          if [ $i -eq 10 ]; then
+            echo "❌ Container did not respond after 10 attempts"
+            docker logs "$CONTAINER_ID"
+            docker stop "$CONTAINER_ID" || true
+            exit 1
+          fi
+          sleep 2
+        done
+        
+        # Stop and remove container
+        docker stop "$CONTAINER_ID" || true
+        docker rm "$CONTAINER_ID" || true
+        
+        echo "✅ Docker runtime test completed successfully"
+
     - name: Upload VSIX artifact
       uses: actions/upload-artifact@v4
       with:
@@ -250,45 +315,22 @@ jobs:
         path: oci-devops/oci-devops-*.vsix
         retention-days: 30
 
-    - name: Commit and push VSIX (if on main/master)
+    - name: Note about VSIX file
       if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        
-        # Find VSIX file
-        VSIX_FILE=$(ls oci-devops/oci-devops-*.vsix 2>/dev/null | head -1)
-        
-        if [ -z "$VSIX_FILE" ]; then
-          echo "No VSIX file found to commit"
-          exit 0
-        fi
-        
-        # Check if VSIX file is tracked and has changes
-        if git ls-files --error-unmatch "$VSIX_FILE" >/dev/null 2>&1; then
-          # File is tracked, check if it changed
-          if ! git diff --quiet "$VSIX_FILE"; then
-            echo "VSIX file has changes, committing..."
-            git add "$VSIX_FILE"
-            git commit -m "chore: update VSIX build [skip ci]" || echo "Commit failed or no changes"
-            git push || echo "Push failed or nothing to push"
-          else
-            echo "VSIX file has no changes"
-          fi
-        else
-          # File is not tracked, add it
-          echo "VSIX file is new, adding and committing..."
-          git add "$VSIX_FILE"
-          git commit -m "chore: add VSIX build artifact [skip ci]" || echo "Commit failed"
-          git push || echo "Push failed"
-        fi
+        echo "ℹ️  VSIX file is available as a downloadable artifact"
+        echo "ℹ️  VSIX files are ignored by .gitignore and are not committed to the repository"
+        echo "ℹ️  Download the VSIX from the workflow artifacts if needed"
 
     - name: Summary
       run: |
         echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ VSIX extension built successfully" >> $GITHUB_STEP_SUMMARY
         echo "- ✅ Docker build test passed" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Docker runtime test passed" >> $GITHUB_STEP_SUMMARY
         if [ -f oci-devops/oci-devops-*.vsix ]; then
           VSIX_SIZE=$(ls -lh oci-devops/oci-devops-*.vsix | awk '{print $5}')
           echo "- 📦 VSIX size: $VSIX_SIZE" >> $GITHUB_STEP_SUMMARY
         fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Note:** VSIX files are available as downloadable artifacts and are not committed to the repository (ignored by .gitignore)"
