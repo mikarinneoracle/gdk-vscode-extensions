@@ -29,7 +29,7 @@ var bunLog = bunyan.createLogger({ name: "LoggingExample", level: "debug" });
 const DEFAULT_NOTIFICATION_TOPIC = 'NotificationTopic';
 const DEFAULT_LOG_GROUP = 'Default_Group';
 const DEFAULT_COMPARTMENT_ACCESS_POLICY = 'CompartmentAccessPolicy';
-const BUILD_IMAGE = 'OL7_X86_64_STANDARD_10';
+const BUILD_IMAGE = 'OL8_X86_64_STANDARD_10';
 
 // PENDING: the waitForResourceCompletionStatus will be replicated for each API, but the semantic should be consistent;
 // must invent some abstraction that allows to extract the loop / result inspection algorithm
